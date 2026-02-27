@@ -48,7 +48,7 @@ Then assign a scalar reward for training the student.
   - If the reason hallucinates/contradicts the trajectory, apply a negative adjustment.
   - If the reason is generic but not wrong, give zero adjustment.
 - Do NOT reward verbosity or style.
-- If the student's output format/label is invalid (not exactly two lines or label not in {negative, neutral, positive}), set reward = -1.0 and stop.
+- If the student's output format/label is invalid (not exactly two lines or label not in {{negative, neutral, positive}}), set reward = -1.0 and stop.
 - If ambiguous, prefer gold_label = neutral and keep reward near 0.
 
 **REWARD SCHEME (two-stage: label first, reason as small adjustment)**
