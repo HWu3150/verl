@@ -14,7 +14,7 @@ custom_reward_function:
   # Extra keyword arguments forwarded to the custom reward function.
   # Fill these placeholders when using API-based scoring.
   reward_kwargs:
-    api_key: sk-NMAXmaDwfgicqAjeARfqyJhrtX6yuLXqzFG0V0aenSw7E2np
+    api_key: null
     base_url: https://api.bltcy.ai/v1/chat/completions
     model: qwen3-32b
 
