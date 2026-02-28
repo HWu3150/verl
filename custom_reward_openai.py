@@ -154,9 +154,11 @@ def compute_score(
                 model=model,
                 messages=[{"role": "user", "content": user_prompt}],
                 temperature=temperature,
-                max_tokens=160,
+                max_tokens=512,
                 timeout=timeout,
+                response_format={"type": "json_object"},
             )
+            # print(resp)
             content = resp.choices[0].message.content.strip()
 
             parsed: Dict[str, Any]

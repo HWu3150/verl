@@ -15,7 +15,7 @@ custom_reward_function:
   # Fill these placeholders when using API-based scoring.
   reward_kwargs:
     api_key: null
-    base_url: https://api.bltcy.ai/v1/chat/completions
+    base_url: https://api.bltcy.ai/v1
     model: qwen3-32b
 
 # reward manager, see `verl/trainer/config/reward_manager.yaml` for details.
