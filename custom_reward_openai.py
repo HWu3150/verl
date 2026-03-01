@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any, Dict
 
@@ -27,57 +28,23 @@ from openai import OpenAI
 PROMPT_TEMPLATE = """You are an expert hindsight judge for action-observation trajectories.
 
 You will be given:
-(2) The FULL trajectory: initial observation, task, steps 1..T, and outcome.
-(3) The student rater's output for step t: exactly two lines:
+- FULL trajectory: initial observation, task, steps 1..T, and outcome.
+- Student output for step t: (ignore the thinking part) two lines:
     Reason: ...
     Label: negative|neutral|positive
 
-**YOUR JOB**
-Using the FULL trajectory as hindsight evidence, evaluate whether the student's LABEL for step t is correct under the label meanings below.
-Then assign a scalar reward for training the student.
+Your job:
+1) Decide whether the student's LABEL is correct in hindsight (use the full trajectory, events after step t allowed).
+2) Produce a scalar reward in [-1, 1]:
+   - exact label match → about +0.8
+   - adjacent mismatch (positive↔neutral or neutral↔negative) → about +0.2
+   - opposite mismatch (positive↔negative) → about -0.8
+   - invalid format/label → -1.0
+   - if the Reason contradicts facts, subtract ~0.2; if it clearly supports, add ~0.2; generic → 0.
+   - clip to [-1, 1].
+3) Do NOT reward verbosity; ambiguity → prefer neutral and keep reward near 0.
 
-**LABEL MEANINGS (hindsight)**
-- positive: step t clearly contributes to eventual task completion OR gathers information/resources that are later used to make progress.
-- neutral: step t is neither clearly helpful nor harmful in hindsight; it does not materially change the chance of success.
-- negative: step t is unproductive/harmful in hindsight: wasted steps, regressions, contradictions, loops, or actions that reduce success probability.
-
-**JUDGING RULES (important)**
-- First decide the hindsight gold_label for step t using the FULL trajectory (you may use events after step t).
-- Reward is label-dominant: score LABEL correctness first; REASON only gives a small adjustment when the label is not clearly wrong.
-- REASON is judged only by evidence alignment: it must match facts in the FULL trajectory and support the label.
-  - If the reason hallucinates/contradicts the trajectory, apply a negative adjustment.
-  - If the reason is generic but not wrong, give zero adjustment.
-- Do NOT reward verbosity or style.
-- If the student's output format/label is invalid (not exactly two lines or label not in {{negative, neutral, positive}}), set reward = -1.0 and stop.
-- If ambiguous, prefer gold_label = neutral and keep reward near 0.
-
-**REWARD SCHEME (two-stage: label first, reason as small adjustment)**
-
-Step A) Decide the hindsight gold_label for step t, using the FULL trajectory.
-
-Step B) Compute base reward from student's label vs gold_label:
-- exact match: base = +0.8
-- adjacent mismatch (positive<->neutral or neutral<->negative): base = +0.2
-- opposite mismatch (positive<->negative): base = -0.8
-- invalid format or invalid label: reward = -1.0 and stop.
-
-Step C) Reason adjustment (ONLY if base >= +0.2):
-Evaluate whether the student's Reason is helpful with the task progress and actually supports the given label.
-Set reason_adj in {{+0.2, 0.0, -0.2}}:
-- +0.2: correctly identifies helpful/harmful aspects of the trajectory, showing good understanding.
--  0.0: generic/weak but not wrong
-- -0.2: contradicts the trajectory, hallucinates, or completely misses the point
-
-Final reward = clip(base + reason_adj, -1.0, +1.0)
-
-IMPORTANT:
-- Do not reward verbosity or style.
-- Reason adjustment must be small; label correctness dominates.
-
-Also output:
-- label_match: one of {{"exact","adjacent","opposite","invalid"}}
-- reason_adj: -0.2|0|+0.2
-- confidence: 0.0..1.0 for your gold_label certainty
+Return ONLY the reward number (float). No JSON, no explanations.
 
 FULL trajectory (steps 1..T):
 {full_traj}
@@ -86,13 +53,7 @@ We are judging step t={t}.
 Student output (two lines):
 {student_two_lines}
 
-OUTPUT FORMAT (valid JSON, no extra text)
-{{
-  "gold_label": "negative|neutral|positive",
-  "reward": <float>,
-  "confidence": <float>,
-  "brief_feedback": "<1~2 sentence>"
-}}
+Now output the reward number only:
 """
 
 
@@ -113,6 +74,7 @@ def compute_score(
     max_retries: int = 3,
     timeout: float | None = 30.0,
     base_url: str | None = None,
+    enable_thinking: bool | None = None,
 ) -> float | Dict[str, Any]:
     """Compute a scalar reward by calling an OpenAI-compatible chat API.
 
@@ -147,32 +109,51 @@ def compute_score(
 
     client = OpenAI(api_key=key, base_url=base_url or os.getenv("OPENAI_BASE_URL"))
 
+    def _strip_wrappers(text: str) -> str:
+        """Remove <think>...</think> prefix and code fences like ```json ... ```."""
+        s = text.strip()
+        if "<think>" in s and "</think>" in s:
+            s = s.split("</think>", 1)[1]
+        if s.startswith("```"):
+            # drop leading fence with optional language
+            s = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", s)
+            # drop trailing fence
+            s = re.sub(r"\n?```$", "", s)
+        return s.strip()
+
     last_err = None
     for attempt in range(max_retries):
         try:
+            extra_body = None
+            if enable_thinking is not None:
+                extra_body = {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
+
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": user_prompt}],
                 temperature=temperature,
-                max_tokens=512,
+                max_tokens=2048,
                 timeout=timeout,
-                response_format={"type": "json_object"},
+                extra_body=extra_body,
             )
-            # print(resp)
-            content = resp.choices[0].message.content.strip()
+            raw_content = resp.choices[0].message.content or resp.choices[0].message.reasoning_content or ""
+            if isinstance(raw_content, list):
+                raw_content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in raw_content)
+            raw_content = str(raw_content)
+
+            # Print full raw answer for debugging (includes think + fences if any)
+            print("[reward debug] raw_response:", raw_content)
+
+            content = _strip_wrappers(raw_content)
 
             parsed: Dict[str, Any]
             score: float
             try:
-                parsed = json.loads(content)
-                score = float(parsed.get("reward"))
-            except Exception:
-                # fallback: maybe model returned bare number
-                try:
-                    score = float(content)
-                    parsed = {"gold_label": None, "reward": score, "confidence": None, "brief_feedback": content}
-                except Exception as parse_err:  # noqa: BLE001
-                    raise ValueError(f"Failed to parse score from response: {content!r}") from parse_err
+                score = float(content)
+                parsed = {"gold_label": None, "reward": score, "confidence": None, "brief_feedback": content}
+            except Exception as parse_err:  # noqa: BLE001
+                print("Failed to parse score from response")
+                score = 0.0
 
             # Clip reward to [-1, 1] as per template
             score = max(-1.0, min(1.0, score))
