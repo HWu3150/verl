@@ -146,29 +146,16 @@ def compute_score(
 
             content = _strip_wrappers(raw_content)
 
-            parsed: Dict[str, Any]
             score: float
             try:
                 score = float(content)
-                parsed = {"gold_label": None, "reward": score, "confidence": None, "brief_feedback": content}
-            except Exception as parse_err:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 print("Failed to parse score from response")
                 score = 0.0
 
             # Clip reward to [-1, 1] as per template
             score = max(-1.0, min(1.0, score))
-            parsed["reward"] = score
-            parsed.setdefault("gold_label", None)
-            parsed.setdefault("confidence", None)
-            parsed.setdefault("brief_feedback", "")
-
-            return {
-                "score": score,
-                "gold_label": parsed.get("gold_label"),
-                "confidence": parsed.get("confidence"),
-                "brief_feedback": parsed.get("brief_feedback"),
-                "raw_response": content,
-            }
+            return {"score": score, "raw_response": content}
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             time.sleep(1.5 * (attempt + 1))
